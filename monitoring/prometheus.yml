@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Discover every policyd replica via Docker DNS (service name resolves to all
+  # replica IPs). Scrapes each replica's metrics port. Works with --scale policyd=N.
+  - job_name: policyd
+    dns_sd_configs:
+      - names: [policyd]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: [__meta_dns_name]
+        target_label: service
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

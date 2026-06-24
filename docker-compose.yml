@@ -1,0 +1,159 @@
+# =============================================================================
+# ratelimit-policyd - HA stack
+#
+#   MTA/PMG --> HAProxy(VIP) --> policyd x3 (stateless) --> Redis (Sentinel HA)
+#                                      |                 --> MariaDB (config+audit)
+#                                      +--> Prometheus --> Grafana
+#
+# Bring up (3 stateless replicas behind HAProxy):
+#   cp .env.example .env   # then edit secrets
+#   docker compose up -d --build --scale policyd=3
+#
+# Point Postfix/PMG at the HAProxy host:  check_policy_service inet:<host>:10032
+# =============================================================================
+name: ratelimit-policyd
+
+services:
+  # --- Config + audit store -------------------------------------------------
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-policyd}
+      MARIADB_USER: ${DB_USER:-policyd}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+    command: ["--max-connections=500", "--innodb-buffer-pool-size=512M"]
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [rlnet]
+
+  # --- Redis primary + replicas (data) --------------------------------------
+  redis-master:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/master.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-master-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [rlnet]
+
+  redis-replica-1:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--replicaof", "redis-master", "6379"]
+    volumes:
+      - ./redis/replica.conf:/usr/local/etc/redis/redis.conf:ro
+    depends_on: [redis-master]
+    networks: [rlnet]
+
+  redis-replica-2:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--replicaof", "redis-master", "6379"]
+    volumes:
+      - ./redis/replica.conf:/usr/local/etc/redis/redis.conf:ro
+    depends_on: [redis-master]
+    networks: [rlnet]
+
+  # --- Redis Sentinels (HA: monitor + auto-failover) ------------------------
+  # Each sentinel copies the template to a writable file (sentinel rewrites it).
+  redis-sentinel-1: &sentinel
+    image: redis:7-alpine
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "cp /etc/redis/sentinel.conf.tmpl /data/sentinel.conf && exec redis-sentinel /data/sentinel.conf"]
+    volumes:
+      - ./redis/sentinel.conf:/etc/redis/sentinel.conf.tmpl:ro
+    depends_on: [redis-master, redis-replica-1, redis-replica-2]
+    networks: [rlnet]
+  redis-sentinel-2:
+    <<: *sentinel
+  redis-sentinel-3:
+    <<: *sentinel
+
+  # --- Stateless policy service (scale this: --scale policyd=N) --------------
+  policyd:
+    build: ./policyd
+    image: ratelimit-policyd-svc:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_SENTINELS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME:-ratemaster}
+      DATABASE_URL: mysql://${DB_USER:-policyd}:${DB_PASSWORD}@db:3306/${DB_NAME:-policyd}
+      RUN_MIGRATIONS: "true"
+      RUN_SEED: "true"
+      POLICY_ALLOW_CIDRS: ""   # behind HAProxy: rely on the internal network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+    expose: ["10032", "8080", "9100"]
+    networks: [rlnet]
+
+  # --- HAProxy: single VIP for the policy port + the admin UI ---------------
+  haproxy:
+    image: haproxy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      # ONLY the policy port is published on the network - the MTA/PMG must reach
+      # it. Set POLICY_LISTEN to a LAN or loopback IP in .env to narrow exposure
+      # (e.g. POLICY_LISTEN=10.0.0.50, or 127.0.0.1 if the MTA is on this host).
+      - "${POLICY_LISTEN:-0.0.0.0}:${POLICY_PORT:-10032}:10032"   # Postfix -> policy (TCP)
+      # Admin UI + HAProxy stats: LOOPBACK ONLY. Reach via SSH tunnel or a TLS
+      # reverse proxy you control - never expose admin straight to the internet.
+      # Host ports are configurable to avoid clashes with other apps on the box.
+      - "0.0.0.0:${UI_PORT:-8080}:8080"      # admin UI + API
+      - "0.0.0.0:${STATS_PORT:-8404}:8404"   # HAProxy stats
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on: [policyd]
+    networks: [rlnet]
+
+  # --- Monitoring -----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    # Grafana reaches Prometheus internally (prometheus:9090). Loopback publish is
+    # only for ad-hoc PromQL; remove this line to keep it fully internal.
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    networks: [rlnet]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    # Dashboard UI: LOOPBACK ONLY -> SSH tunnel or TLS reverse proxy to view.
+    ports: ["0.0.0.0:${GRAFANA_PORT:-3000}:3000"]
+    depends_on: [prometheus]
+    networks: [rlnet]
+
+networks:
+  rlnet:
+    driver: bridge
+
+volumes:
+  dbdata:
+  redis-master-data:
+  prom-data:
+  grafana-data:

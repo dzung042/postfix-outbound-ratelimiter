@@ -1,0 +1,117 @@
+// Prisma schema for ratelimit-policyd config + audit store.
+// Engine: MySQL/MariaDB. Read-mostly; cached in-process and refreshed via Redis pub/sub.
+
+generator client {
+  provider = "prisma-client-js"
+  // Pin engine targets so the generated client matches the runtime image
+  // (node:bookworm = OpenSSL 3.0). "native" covers local dev.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+/// A plan/tier: the inherited limit profile most senders use.
+/// Resolution order: sender override > domain override > tier > built-in default.
+model Tier {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique @db.VarChar(64)
+  perMin     Int      @default(0) // recipients / 60s   (0 = unlimited for this window)
+  perHour    Int      @default(0)
+  perDay     Int      @default(0)
+  perMonth   Int      @default(0)
+  maxRcptMsg Int      @default(100) // hard cap on recipients per single message
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  domains    Domain[]
+  senders    Sender[]
+
+  @@map("policy_tier")
+}
+
+/// Per-domain policy. Inherits its tier; nullable columns override that tier.
+/// Domain limits apply to the SUM of all senders in the domain (a second scope).
+model Domain {
+  domain    String   @id @db.VarChar(255)
+  tier      Tier?    @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  tierId    Int?
+  perHour   Int? // null = inherit tier
+  perDay    Int?
+  enabled   Boolean  @default(true)
+  note      String?  @db.VarChar(255)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tierId])
+  @@map("policy_domain")
+}
+
+enum SenderStatus {
+  active
+  warmup
+  suspended
+}
+
+/// Per-sender (SASL username) state and optional overrides.
+/// Lazily created on first sighting; one row per sender that has ever sent.
+model Sender {
+  email     String       @id @db.VarChar(255)
+  domain    String       @db.VarChar(255)
+  tier      Tier?        @relation(fields: [tierId], references: [id], onDelete: SetNull)
+  tierId    Int?
+  perMin    Int?
+  perHour   Int?
+  perDay    Int?
+  perMonth  Int?
+  persist   Boolean      @default(false) // keep overrides; never auto-reset to tier
+  status    SenderStatus @default(warmup)
+  reason    String?      @db.VarChar(255) // why suspended, if suspended
+  firstSeen DateTime     @default(now())
+  lastSeen  DateTime     @default(now())
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  @@index([domain])
+  @@index([status])
+  @@map("policy_sender")
+}
+
+/// Optional time-of-day schedules: scale limits up/down by hour/weekday.
+model Schedule {
+  id         Int      @id @default(autoincrement())
+  scope      String   @db.VarChar(16) // "domain" | "sender" | "global"
+  ref        String   @db.VarChar(255) // domain, email, or "*"
+  dowMask    Int      @default(127) // weekday bitmask, bit0=Sun ... bit6=Sat
+  hourStart  Int      @default(0)
+  hourEnd    Int      @default(23)
+  multiplier Float    @default(1.0) // limits * multiplier inside the window
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@index([scope, ref])
+  @@map("policy_schedule")
+}
+
+/// Audit / event log. Source for the dashboard and for abuse forensics.
+/// Written asynchronously (batched) to avoid one INSERT per mail.
+model Event {
+  id         BigInt   @id @default(autoincrement())
+  ts         DateTime @default(now())
+  email      String   @db.VarChar(255)
+  domain     String   @db.VarChar(255)
+  clientIp   String   @db.VarChar(45)
+  window     String   @db.VarChar(8) // m1|h1|d1|mo|msg|--
+  currentCnt Int      @default(0)
+  limitCnt   Int      @default(0)
+  action     String   @db.VarChar(32) // UPDATE|OVER_QUOTA|REJECT|SUSPEND|ANOMALY|OBSERVE|BOUNCE_RATE
+  queueId    String   @db.VarChar(32)
+  risk       Int      @default(0) // 0..100 risk score at the time of the event
+
+  @@index([ts])
+  @@index([email])
+  @@index([action])
+  @@map("policy_event")
+}

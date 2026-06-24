@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mail Rate-Limit Control</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:," />
+</head>
+<body>
+  <!-- Toast / error banner -->
+  <div id="toast" class="toast hidden" role="alert">
+    <span id="toast-msg"></span>
+    <button id="toast-close" class="toast-close" aria-label="Dismiss">&times;</button>
+  </div>
+
+  <!-- Login screen -->
+  <section id="login" class="login hidden">
+    <form id="login-form" class="login-card">
+      <h1 class="login-title">Rate-Limit Control</h1>
+      <p class="login-sub">Sign in to manage mail policies</p>
+      <label class="field">
+        <span>Username</span>
+        <input id="login-user" type="text" autocomplete="username" required />
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="login-pass" type="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+    </form>
+  </section>
+
+  <!-- Application shell -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        Rate-Limit Control
+      </div>
+      <nav id="nav" class="nav">
+        <button class="nav-tab" data-tab="dashboard">Dashboard</button>
+        <button class="nav-tab" data-tab="tiers">Tiers</button>
+        <button class="nav-tab" data-tab="domains">Domains</button>
+        <button class="nav-tab" data-tab="senders">Senders</button>
+        <button class="nav-tab" data-tab="events">Events</button>
+      </nav>
+      <button id="logout" class="btn btn-ghost">Logout</button>
+    </header>
+
+    <main id="view" class="view"></main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
