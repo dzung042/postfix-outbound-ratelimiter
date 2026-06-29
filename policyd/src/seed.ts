@@ -1,11 +1,11 @@
 /**
- * Seed default tiers. Idempotent (upsert by unique name).
- * Numbers are recipients-per-window. 0 = that window is unlimited.
+ * Seed default tiers. CREATE-ONLY: it inserts a tier only if it does not exist
+ * yet, and NEVER overwrites an existing one. This is what makes admin edits in
+ * the UI survive container restarts (RUN_SEED=true stays safe / self-healing:
+ * it only re-creates a required base tier that was deleted, e.g. warmup/default).
  *
- * These defaults are deliberately conservative for outbound anti-spam; adjust
- * per your customer base via the admin UI. They model what large senders do:
- * a low warm-up for new accounts, a sane default for normal users, and higher
- * vetted tiers for business/VIP.
+ * Numbers are recipients-per-window. 0 = that window is unlimited.
+ * Defaults are conservative for outbound anti-spam; tune them via the admin UI.
  */
 import { PrismaClient } from '@prisma/client';
 
@@ -21,20 +21,15 @@ const TIERS = [
 
 async function main() {
   for (const t of TIERS) {
+    // update:{} = if the tier already exists, leave admin's values untouched.
+    const before = await prisma.tier.findUnique({ where: { name: t.name } });
     await prisma.tier.upsert({
       where: { name: t.name },
-      update: {
-        perMin: t.perMin,
-        perHour: t.perHour,
-        perDay: t.perDay,
-        perMonth: t.perMonth,
-        maxRcptMsg: t.maxRcptMsg,
-        enabled: true,
-      },
+      update: {}, // never overwrite existing tiers
       create: { ...t, enabled: true },
     });
     // eslint-disable-next-line no-console
-    console.log(`[seed] tier ${t.name} ok`);
+    console.log(`[seed] tier ${t.name} ${before ? 'kept (already exists)' : 'created'}`);
   }
 }
 

@@ -319,6 +319,18 @@ td.actions .btn { margin-right: 4px; }
 .pager { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .pager .muted { font-variant-numeric: tabular-nums; }
 
+.legend {
+  margin-top: 16px; padding: 14px 16px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--card-bg, rgba(255,255,255,0.02));
+  font-size: 13px; line-height: 1.5; color: var(--text-faint);
+}
+.legend-title { font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.legend-item { display: flex; gap: 8px; margin: 3px 0; }
+.legend-key {
+  flex: 0 0 110px; font-weight: 600; font-family: ui-monospace, monospace;
+  color: var(--text);
+}
+
 @media (max-width: 720px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 10px; }
   .nav { order: 3; width: 100%; overflow-x: auto; }

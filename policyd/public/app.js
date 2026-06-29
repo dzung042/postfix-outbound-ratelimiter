@@ -609,8 +609,27 @@ async function loadSenders() {
     el('div', { class: 'toolbar' }, [search, statusSel,
       el('button', { class: 'btn btn-sm', text: 'Refresh', onClick: renderSendersTable })]),
   ]);
-  setView(head, senderForm(), el('div', { id: 'senders-table' }), el('div', { id: 'senders-pager' }));
+  setView(
+    head,
+    el('div', { id: 'senders-stats', class: 'cards' }),
+    senderForm(),
+    el('div', { id: 'senders-table' }),
+    el('div', { id: 'senders-pager' }),
+  );
   await renderSendersTable();
+}
+
+function renderSendersStats(stats) {
+  const wrap = $('#senders-stats');
+  if (!wrap) return;
+  const s = stats || { total: 0, active: 0, warmup: 0, suspended: 0 };
+  wrap.innerHTML = '';
+  wrap.append(
+    statCard('Total senders', s.total ?? 0, ''),
+    statCard('Active', s.active ?? 0, 'green'),
+    statCard('Warmup', s.warmup ?? 0, 'amber'),
+    statCard('Suspended', s.suspended ?? 0, 'red'),
+  );
 }
 
 function senderForm() {
@@ -667,13 +686,14 @@ async function renderSendersTable() {
   if (!data) return;
   s.total = data.total || 0;
   const items = data.items || [];
+  renderSendersStats(data.stats);
 
   wrap.innerHTML = '';
   const table = el('table');
-  table.append(thead(['Email', 'Domain', 'Tier', 'Status', 'Limits (m/h/d/mo)', '']));
+  table.append(thead(['Email', 'Domain', 'Tier', 'Status', 'Limits (m/h/d/mo)', 'Would-suspend', '']));
   const tb = el('tbody');
   if (!items.length) {
-    tb.append(el('tr', {}, el('td', { colspan: 6, class: 'empty', text: 'No senders found' })));
+    tb.append(el('tr', {}, el('td', { colspan: 7, class: 'empty', text: 'No senders found' })));
   }
   for (const it of items) tb.append(senderRow(it));
   table.append(tb);
@@ -683,6 +703,17 @@ async function renderSendersTable() {
 
 function limitsText(s) {
   return SENDER_LIMITS.map((k) => (s[k] == null ? '—' : s[k])).join(' / ');
+}
+
+/* "Would-suspend": anomaly flag count crossed the suspend threshold. In observe
+   mode this is a warning only; in enforce mode such a sender is auto-suspended. */
+function wouldSuspendCell(s) {
+  const risk = Number(s.risk || 0);
+  if (s.wouldSuspend) {
+    return badge('suspended', `Yes · risk ${risk}`);
+  }
+  if (risk > 0) return badge('warmup', `risk ${risk}`);
+  return el('span', { class: 'muted', text: '—' });
 }
 
 function senderRow(s) {
@@ -697,6 +728,7 @@ function senderRow(s) {
     el('td', { text: s.tierId == null ? '—' : tierName(s.tierId) }),
     el('td', {}, badge(s.status, s.status)),
     el('td', { class: 'muted', text: limitsText(s) }),
+    el('td', {}, wouldSuspendCell(s)),
     el('td', { class: 'actions' }, [
       el('button', { class: 'btn btn-sm', text: 'Edit', onClick: () => editSenderRow(tr, s) }),
       toggleBtn,
@@ -727,6 +759,7 @@ function editSenderRow(tr, s) {
     el('td', {}, sel),
     el('td', {}, statusSel),
     limitsTd,
+    el('td', {}, wouldSuspendCell(s)),
     el('td', { class: 'actions' }, [
       el('button', {
         class: 'btn btn-sm btn-primary', text: 'Save',
@@ -823,19 +856,40 @@ async function renderEventsTable() {
   for (const ev of rows) {
     const tr = el('tr');
     if (RED_ACTIONS.has((ev.action || '').toUpperCase())) tr.classList.add('row-danger');
+    const isAnomaly = (ev.window || '') === 'anomaly';
+    // The Cnt/Limit column overloads two meanings; spell it out on hover.
+    const cntTitle = isAnomaly
+      ? 'Anomaly flags accumulated / threshold to suspend (ANOMALY_FLAGS_TO_SUSPEND)'
+      : 'Messages sent in this window / the configured limit';
     tr.append(
       el('td', { text: fmtDate(ev.ts) }),
       el('td', { text: ev.email || '' }),
       el('td', { text: ev.action || '' }),
       el('td', { text: ev.window || '' }),
-      el('td', { text: `${ev.currentCnt ?? ''} / ${ev.limitCnt ?? ''}` }),
+      el('td', { title: cntTitle, text: `${ev.currentCnt ?? ''} / ${ev.limitCnt ?? ''}` }),
       el('td', { class: 'muted', text: ev.clientIp || '' }),
       el('td', { class: 'muted', text: ev.queueId || '' }),
     );
     tb.append(tr);
   }
   table.append(tb);
-  wrap.append(el('div', { class: 'table-wrap' }, table));
+  wrap.append(el('div', { class: 'table-wrap' }, table), eventsLegend());
+}
+
+/* Explains the overloaded ACTION / Cnt-Limit columns right under the table. */
+function eventsLegend() {
+  const item = (k, v) => el('div', { class: 'legend-item' }, [
+    el('span', { class: 'legend-key', text: k }), el('span', { text: v }),
+  ]);
+  return el('div', { class: 'legend' }, [
+    el('div', { class: 'legend-title', text: 'How to read this log' }),
+    item('OVER_QUOTA', 'over the rate limit — deferred (4xx, retried). Cnt/Limit = messages sent / limit, for window m1/h1/d1/mo.'),
+    item('OBSERVE', 'observe mode: would have been suspended but mail was allowed. window=anomaly, Cnt/Limit = flags / suspend-threshold.'),
+    item('ANOMALY', 'behavioural flag raised (below the suspend threshold). window=anomaly.'),
+    item('SUSPEND', 'sender blocked — rejected (5xx). window=anomaly shows flags / threshold; window=-- means a manual/blocklist suspend.'),
+    item('UPDATE', 'an accepted (allowed) message, sampled. Cnt/Limit = recipients / hourly limit.'),
+    el('div', { class: 'muted', text: 'window "anomaly" = behavioural detector (per-minute flags), not a sending quota. m1/h1/d1/mo = real per minute/hour/day/month quotas.' }),
+  ]);
 }
 
 /* ============================================================

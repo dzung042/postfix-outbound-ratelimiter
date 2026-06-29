@@ -131,7 +131,7 @@ export class PolicyService {
         );
         this.metrics.decisions.inc({ action: 'suspend' });
         this.events.push({
-          email, domain, clientIp, window: 'm1', currentCnt: an.flagCount,
+          email, domain, clientIp, window: 'anomaly', currentCnt: an.flagCount,
           limitCnt: this.cfg.anomalyFlagsToSuspend, action: 'SUSPEND', queueId, risk: an.risk,
         });
         return this.rejectAction();
@@ -140,7 +140,7 @@ export class PolicyService {
         // observe mode: would have suspended. Alert + record, but let mail through.
         this.metrics.observeWouldSuspend.inc({ source: 'anomaly' });
         this.events.push({
-          email, domain, clientIp, window: 'm1', currentCnt: an.flagCount,
+          email, domain, clientIp, window: 'anomaly', currentCnt: an.flagCount,
           limitCnt: this.cfg.anomalyFlagsToSuspend, action: 'OBSERVE', queueId, risk: an.risk,
         });
         void this.notify.alert(
@@ -151,7 +151,7 @@ export class PolicyService {
         );
       } else if (an.flags.length > 0) {
         this.events.push({
-          email, domain, clientIp, window: 'm1', currentCnt: an.flagCount,
+          email, domain, clientIp, window: 'anomaly', currentCnt: an.flagCount,
           limitCnt: this.cfg.anomalyFlagsToSuspend, action: 'ANOMALY', queueId, risk: an.risk,
         });
       }

@@ -11,9 +11,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { AppConfig } from '../config/app-config';
 import { ConfigCacheService } from '../policy/config-cache.service';
 import { SenderControlService } from '../policy/sender-control.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { JwtAuthGuard } from './auth/jwt.guard';
 import { ListSendersQuery, SenderDto, SuspendDto } from './dto';
 
@@ -24,6 +26,8 @@ export class SendersController {
     private readonly prisma: PrismaService,
     private readonly cache: ConfigCacheService,
     private readonly control: SenderControlService,
+    private readonly redis: RedisService,
+    private readonly cfg: AppConfig,
   ) {}
 
   @Get()
@@ -36,7 +40,7 @@ export class SendersController {
     }
     const page = q.page ?? 1;
     const pageSize = Math.min(q.pageSize ?? 50, 200);
-    const [items, total] = await Promise.all([
+    const [items, total, statusGroups] = await Promise.all([
       this.prisma.sender.findMany({
         where,
         orderBy: { lastSeen: 'desc' },
@@ -44,8 +48,31 @@ export class SendersController {
         take: pageSize,
       }),
       this.prisma.sender.count({ where }),
+      // Total user counts by status (global, unfiltered) for the summary strip.
+      this.prisma.sender
+        .groupBy({ by: ['status'], _count: { _all: true } })
+        .catch(() => [] as { status: string; _count: { _all: number } }[]),
     ]);
-    return { items, total };
+
+    const stats = { total: 0, active: 0, warmup: 0, suspended: 0 };
+    for (const g of statusGroups as { status: string; _count: { _all: number } }[]) {
+      const cnt = g._count._all;
+      stats.total += cnt;
+      if (g.status in stats) (stats as any)[g.status] = cnt;
+    }
+
+    // Per-sender anomaly state -> "Would-suspend" flag. flagCount >= threshold is
+    // the same condition the anomaly engine uses for AnomalyResult.wouldSuspend.
+    const anom = await this.redis
+      .senderAnomaly(items.map((it) => it.email))
+      .catch(() => ({}) as Record<string, { risk: number; flags: number }>);
+    const threshold = this.cfg.anomalyFlagsToSuspend;
+    const enriched = items.map((it) => {
+      const a = anom[it.email] || { risk: 0, flags: 0 };
+      return { ...it, risk: a.risk, flags: a.flags, wouldSuspend: a.flags >= threshold };
+    });
+
+    return { items: enriched, total, stats, mode: this.cfg.anomalyMode };
   }
 
   @Post()

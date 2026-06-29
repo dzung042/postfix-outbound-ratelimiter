@@ -174,6 +174,37 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return out;
   }
 
+  /**
+   * Batch lookup of the per-sender anomaly state used by the Senders table:
+   * the current risk score (from the risk ZSET) and the rolling flag count
+   * (`an:flags:<email>`). Compared against ANOMALY_FLAGS_TO_SUSPEND by the
+   * caller, the flag count is what makes `wouldSuspend` true. Best-effort: any
+   * Redis hiccup yields zeros so the listing never breaks.
+   */
+  async senderAnomaly(
+    emails: string[],
+  ): Promise<Record<string, { risk: number; flags: number }>> {
+    const out: Record<string, { risk: number; flags: number }> = {};
+    if (!emails.length) return out;
+    try {
+      const z = this.k('lb:risk:email');
+      const pipe = this.client.pipeline();
+      for (const e of emails) {
+        pipe.get(this.k(`an:flags:${e}`));
+        pipe.zscore(z, e);
+      }
+      const res = (await pipe.exec()) || [];
+      emails.forEach((e, i) => {
+        const flags = Number(res[i * 2]?.[1] || 0);
+        const risk = Number(res[i * 2 + 1]?.[1] || 0);
+        out[e] = { risk, flags };
+      });
+    } catch {
+      for (const e of emails) out[e] = { risk: 0, flags: 0 };
+    }
+    return out;
+  }
+
   // --- feedback / bounce-rate counters (option B) ---
   private fbBucket(windowHours: number): number {
     return Math.floor(Date.now() / 1000 / (windowHours * 3600));
