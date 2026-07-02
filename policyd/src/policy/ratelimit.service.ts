@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { AppConfig } from '../config/app-config';
 import { RedisService, WindowSpec } from '../redis/redis.service';
 import type { EffectiveLimits } from './config-cache.service';
 import { ConfigCacheService } from './config-cache.service';
@@ -22,6 +23,7 @@ export class RateLimitService {
   constructor(
     private readonly redis: RedisService,
     private readonly cache: ConfigCacheService,
+    private readonly cfg: AppConfig,
   ) {}
 
   async check(
@@ -63,7 +65,10 @@ export class RateLimitService {
       }
     }
 
-    const res = await this.redis.rlCheck(specs, recipientCount);
+    // Count mode: 'recipients' (default) adds the recipient count to each window;
+    // 'messages' adds 1 per email (fan-out is then bounded only by maxRcptMsg).
+    const inc = this.cfg.rateCountMode === 'messages' ? 1 : recipientCount;
+    const res = await this.redis.rlCheck(specs, inc);
     if (res.allowed) {
       void this.updateLeaderboard(email, domain, b);
       return { allowed: true };

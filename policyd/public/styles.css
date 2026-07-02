@@ -206,6 +206,8 @@ textarea { resize: vertical; min-height: 56px; }
   margin-bottom: 20px;
 }
 .stat-card { display: flex; flex-direction: column; gap: 6px; }
+.stat-card.clickable { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.stat-card.clickable:hover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .stat-label {
   font-size: 12px;
   color: var(--text-dim);
@@ -324,6 +326,7 @@ td.actions .btn { margin-right: 4px; }
   border-radius: 8px; background: var(--card-bg, rgba(255,255,255,0.02));
   font-size: 13px; line-height: 1.5; color: var(--text-faint);
 }
+.count-hint { font-size: 12px; margin-top: 2px; }
 .legend-title { font-weight: 600; color: var(--text); margin-bottom: 8px; }
 .legend-item { display: flex; gap: 8px; margin: 3px 0; }
 .legend-key {

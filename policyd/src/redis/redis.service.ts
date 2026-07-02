@@ -249,6 +249,22 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // --- cluster-wide "allowed decisions" counter (dashboard) ---
+  // Allowed messages are not written to the event log (that would flood it), so
+  // count them in a per-clock-hour Redis key instead. Best-effort; never blocks.
+  async incrAllow(): Promise<void> {
+    const b = Math.floor(Date.now() / 3_600_000);
+    try {
+      await this.incrTtl(`stats:allow:${b}`, 1, 7200);
+    } catch {
+      /* best-effort */
+    }
+  }
+  async allowCount(): Promise<number> {
+    const b = Math.floor(Date.now() / 3_600_000);
+    return this.getNum(`stats:allow:${b}`).catch(() => 0);
+  }
+
   // --- pub/sub for config reloads + alert de-dupe ---
   async publish(channel: string, message: string): Promise<void> {
     await this.client.publish(channel, message);

@@ -11,6 +11,7 @@ const TOKEN_KEY = 'rlc_token';
 const state = {
   tab: 'dashboard',
   tiers: [],          // cached tier list (used by dropdowns/labels)
+  rateCountMode: '',  // 'recipients' | 'messages' (from /dashboard/stats)
   dashTimer: null,
   dashWindow: 'h1',
   senders: { search: '', status: '', page: 1, pageSize: 50, total: 0 },
@@ -202,6 +203,24 @@ function tierName(id) {
   return t ? t.name : `#${id}`;
 }
 
+/* Learn how limits are counted (recipients vs messages) so we can label the
+   Tiers/Senders limit columns. Cached after the first fetch. */
+async function ensureRateCountMode() {
+  if (state.rateCountMode) return state.rateCountMode;
+  const s = await safe(api('/dashboard/stats'));
+  if (s && s.rateCountMode) state.rateCountMode = s.rateCountMode;
+  return state.rateCountMode;
+}
+function countUnitLabel() {
+  return state.rateCountMode === 'messages' ? 'messages' : 'recipients';
+}
+function countHint() {
+  return el('div', {
+    class: 'muted count-hint',
+    text: `Limits count ${countUnitLabel()} per window (RATE_COUNT_MODE).`,
+  });
+}
+
 /* ============================================================
    DASHBOARD
    ============================================================ */
@@ -249,29 +268,50 @@ async function refreshDashboard() {
 async function refreshStats() {
   const s = await safe(api('/dashboard/stats'));
   if (!s) return;
+  if (s.rateCountMode) state.rateCountMode = s.rateCountMode;
   const cards = $('#dash-cards');
   if (!cards) return;
   const d = s.decisions || {};
   cards.innerHTML = '';
+  const allowCard = statCard('Allow', d.allow ?? 0, 'green');
+  allowCard.title = 'Allowed messages this clock-hour. Individual allows are not logged; set EVENT_SAMPLE_OK>0 to sample them into Events.';
   cards.append(
-    statCard('Allow', d.allow ?? 0, 'green'),
-    statCard('Defer', d.defer ?? 0, 'amber'),
-    statCard('Reject', d.reject ?? 0, 'red'),
-    statCard('Suspend', d.suspend ?? 0, 'red'),
+    allowCard,
+    statCard('Defer', d.defer ?? 0, 'amber', () => drillEvents('OVER_QUOTA')),
+    statCard('Reject', d.reject ?? 0, 'red', () => drillEvents('REJECT')),
+    statCard('Suspend', d.suspend ?? 0, 'red', () => drillEvents('SUSPEND')),
     statCard('Mode', s.mode ?? '-', s.mode === 'enforce' ? 'green' : 'amber'),
-    statCard('Would-suspend', s.observe ?? 0, 'amber'),
-    statCard('Bounce flags', s.bounceFlags ?? 0, 'red'),
-    statCard('Active senders', s.activeSenders ?? 0, ''),
-    statCard('Suspended', s.suspended ?? 0, 'red'),
+    statCard('Counting', s.rateCountMode ?? 'recipients', ''),
+    statCard('Would-suspend', s.observe ?? 0, 'amber', () => drillEvents('OBSERVE')),
+    statCard('Bounce flags', s.bounceFlags ?? 0, 'red', () => drillEvents('BOUNCE_RATE')),
+    statCard('Active senders', s.activeSenders ?? 0, '', () => drillSenders('active')),
+    statCard('Suspended', s.suspended ?? 0, 'red', () => drillSenders('suspended')),
     redisCard(!!s.redisUp),
   );
 }
 
-function statCard(label, value, color) {
-  return el('div', { class: 'card stat-card' }, [
+/* Jump to the Events tab filtered by a single action (dashboard drill-down). */
+function drillEvents(action) {
+  state.events = { email: '', action };
+  setTab('events');
+}
+/* Jump to the Senders tab filtered by status. */
+function drillSenders(status) {
+  state.senders.status = status;
+  state.senders.page = 1;
+  setTab('senders');
+}
+
+function statCard(label, value, color, onClick) {
+  const card = el('div', { class: 'card stat-card' + (onClick ? ' clickable' : '') }, [
     el('div', { class: 'stat-label', text: label }),
     el('div', { class: 'stat-value ' + color, text: String(value) }),
   ]);
+  if (onClick) {
+    card.title = 'Click to view the list';
+    card.addEventListener('click', onClick);
+  }
+  return card;
 }
 
 function redisCard(up) {
@@ -331,8 +371,9 @@ function thead(cols) {
 const TIER_FIELDS = ['perMin', 'perHour', 'perDay', 'perMonth', 'maxRcptMsg'];
 
 async function loadTiers() {
+  await ensureRateCountMode();
   const head = el('div', { class: 'view-head' }, [
-    el('h2', { text: 'Tiers' }),
+    el('div', {}, [el('h2', { text: 'Tiers' }), countHint()]),
     el('div', { class: 'toolbar' }, el('button', { class: 'btn btn-sm', text: 'Refresh', onClick: loadTiers })),
   ]);
   setView(head, tierForm(), el('div', { id: 'tiers-table' }));
@@ -588,6 +629,7 @@ const SENDER_LIMITS = ['perMin', 'perHour', 'perDay', 'perMonth'];
 
 async function loadSenders() {
   await ensureTiers();
+  await ensureRateCountMode();
   const s = state.senders;
   const search = el('input', {
     class: 'search-input', type: 'search', placeholder: 'Search email / domain…', value: s.search,
@@ -605,7 +647,7 @@ async function loadSenders() {
   ]);
 
   const head = el('div', { class: 'view-head' }, [
-    el('h2', { text: 'Senders' }),
+    el('div', {}, [el('h2', { text: 'Senders' }), countHint()]),
     el('div', { class: 'toolbar' }, [search, statusSel,
       el('button', { class: 'btn btn-sm', text: 'Refresh', onClick: renderSendersTable })]),
   ]);

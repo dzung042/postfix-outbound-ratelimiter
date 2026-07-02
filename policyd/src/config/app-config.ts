@@ -49,6 +49,15 @@ export class AppConfig {
   readonly rejectText =
     process.env.REJECT_TEXT || '5.7.1 Sending temporarily disabled (suspected abuse)';
   readonly failAction = (process.env.FAIL_ACTION || 'DUNNO').toUpperCase();
+  // How the multi-window quotas are counted:
+  //   'recipients' (default, same as the old daemon.pl) = count RECIPIENTS per
+  //                 window (a message to N recipients adds N).
+  //   'messages'  = each email adds 1 regardless of recipient count; rely on
+  //                 maxRcptMsg to bound per-message fan-out.
+  readonly rateCountMode: 'recipients' | 'messages' =
+    (process.env.RATE_COUNT_MODE || 'recipients').toLowerCase() === 'messages'
+      ? 'messages'
+      : 'recipients';
 
   // Defaults / warm-up
   readonly defaultTier = process.env.DEFAULT_TIER || 'default';
@@ -60,7 +69,10 @@ export class AppConfig {
   readonly anomalyEnabled = bool(process.env.ANOMALY_ENABLED, true);
   // 'observe' = detect + alert + risk score but DO NOT suspend (safe rollout);
   // 'enforce' = also auto-suspend + hard bounce when the threshold is crossed.
-  readonly anomalyMode = (process.env.ANOMALY_MODE || 'observe').toLowerCase();
+  // Anything else (a typo like 'suspend') coerces to 'observe' — never silently
+  // "enforce"; validateOrThrow() logs a warning so the misconfig is visible.
+  readonly anomalyMode: 'observe' | 'enforce' =
+    (process.env.ANOMALY_MODE || 'observe').toLowerCase() === 'enforce' ? 'enforce' : 'observe';
   readonly anomalyBurstPerMin = num(process.env.ANOMALY_BURST_PER_MIN, 120);
   readonly anomalyDistinctRcptPerMin = num(process.env.ANOMALY_DISTINCT_RCPT_PER_MIN, 80);
   readonly anomalyOffhoursStart = num(process.env.ANOMALY_OFFHOURS_START, 1);
@@ -86,12 +98,24 @@ export class AppConfig {
   readonly telegramChatId = process.env.TELEGRAM_CHAT_ID || '';
   readonly alertWebhookUrl = process.env.ALERT_WEBHOOK_URL || '';
   readonly alertMinIntervalSec = num(process.env.ALERT_MIN_INTERVAL_SEC, 300);
+  // Optional: alert when a sender exceeds its TIER's hourly limit (perHour of
+  // the resolved tier — so the threshold matches each sender's tier, not a fixed
+  // number). Off by default. Fires once per sender per clock-hour.
+  readonly notifyOverHourly = bool(process.env.NOTIFY_OVER_HOURLY, false);
 
   // Ops
   readonly logLevel = process.env.LOG_LEVEL || 'info';
   readonly eventSampleOk = num(process.env.EVENT_SAMPLE_OK, 0);
 
   validateOrThrow(): void {
+    const rawMode = (process.env.ANOMALY_MODE || 'observe').toLowerCase();
+    if (rawMode !== 'observe' && rawMode !== 'enforce') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[config] ANOMALY_MODE="${rawMode}" is invalid -> using "observe". ` +
+          `Valid: observe | enforce. Set ANOMALY_MODE=enforce to auto-suspend.`,
+      );
+    }
     const errs: string[] = [];
     if (!this.jwtSecret || this.jwtSecret.length < 16)
       errs.push('JWT_SECRET must be set and >= 16 chars');

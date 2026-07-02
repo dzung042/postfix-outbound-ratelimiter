@@ -7,6 +7,7 @@ import { AnomalyService } from './anomaly.service';
 import { ConfigCacheService } from './config-cache.service';
 import { EventWriterService } from './event-writer.service';
 import { RateLimitService } from './ratelimit.service';
+import { normalizeSender } from './sender';
 import { SenderControlService } from './sender-control.service';
 
 /** Parsed Postfix policy request attributes (subset we use). */
@@ -53,7 +54,7 @@ export class PolicyService {
     try {
       // Only act at DATA, where recipient_count is known. Other stages pass.
       const state = (req.protocol_state || '').toUpperCase();
-      const principal = (req.sasl_username || req.sender || '').trim().toLowerCase();
+      const principal = normalizeSender(req.sasl_username || req.sender || '');
       if (state !== 'DATA' || !principal) {
         this.metrics.decisions.inc({ action: 'allow' });
         return 'DUNNO';
@@ -110,6 +111,28 @@ export class PolicyService {
           email, domain, clientIp, window: rl.window || 'h1',
           currentCnt: rl.current || 0, limitCnt: rl.limit || 0, action: 'OVER_QUOTA', queueId,
         });
+        // Optional (env NOTIFY_OVER_HOURLY): notify when a sender exceeds its
+        // TIER's HOURLY allowance (eff.perHour, varies per tier). This is exactly
+        // the hourly over-quota, so the number always matches the sender's tier.
+        // Fires once per sender per clock-hour (Redis-deduped, cluster-wide).
+        if (this.cfg.notifyOverHourly && rl.window === 'h1') {
+          const hourBucket = Math.floor(now.getTime() / 3_600_000);
+          void this.redis
+            .firstInWindow(`hqvol:${email}:${hourBucket}`, 3700)
+            .then((first) => {
+              if (!first) return undefined;
+              const scope = rl.scope || 'email';
+              const body =
+                this.cfg.rateCountMode === 'messages'
+                  ? `${email}\nover its ${scope} hourly cap: reached ${rl.current}/${rl.limit} ` +
+                    `messages/h (tier ${eff.tierName}). Message deferred (451).`
+                  : `${email}\nover its ${scope} hourly cap: had ${rl.current} + ${rcpt} ` +
+                    `recipient(s) this message > ${rl.limit}/h (tier ${eff.tierName}). ` +
+                    `Message deferred (451). Note: the limit counts RECIPIENTS, not messages.`;
+              return this.notify.alert('warn', 'Sender over hourly limit', body);
+            })
+            .catch(() => undefined);
+        }
         return this.deferAction();
       }
 
@@ -158,6 +181,7 @@ export class PolicyService {
 
       // 6) Allowed.
       this.metrics.decisions.inc({ action: 'allow' });
+      void this.redis.incrAllow().catch(() => undefined); // cluster-wide allow count for the dashboard
       if (this.cfg.eventSampleOk > 0 && rcpt >= this.cfg.eventSampleOk) {
         this.events.push({
           email, domain, clientIp, window: 'h1', currentCnt: rcpt, limitCnt: eff.perHour,

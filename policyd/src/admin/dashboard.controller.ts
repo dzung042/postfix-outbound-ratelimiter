@@ -33,19 +33,23 @@ export class DashboardController {
       grouped = [];
     }
     const c = (a: string) => grouped.find((g) => g.action === a)?._count._all ?? 0;
-    const [redisUp, activeSenders, suspended] = await Promise.all([
+    const [redisUp, activeSenders, suspended, allow] = await Promise.all([
       this.redis.ping(),
       this.redis.activeSenders().catch(() => 0),
       this.redis.suspendedCount().catch(() => 0),
+      this.redis.allowCount().catch(() => 0),
     ]);
     return {
       decisions: {
-        allow: c('UPDATE'),
+        // Allowed messages aren't logged (would flood the event table); counted
+        // cluster-wide in Redis for the current clock-hour instead.
+        allow,
         defer: c('OVER_QUOTA'),
         reject: c('REJECT'),
         suspend: c('SUSPEND'),
       },
       mode: this.cfg.anomalyMode, // 'observe' | 'enforce'
+      rateCountMode: this.cfg.rateCountMode, // 'recipients' | 'messages'
       observe: c('OBSERVE'), // would-have-suspended (observe mode), last hour
       bounceFlags: c('BOUNCE_RATE'), // high bounce-rate flags, last hour
       activeSenders,
